@@ -44,8 +44,8 @@ KP_LEFT_HIP       = 11
 KP_RIGHT_HIP      = 12
 
 # ===== LOAD MODEL =====
-MODEL_PATH  = "movenet_thunder.tflite"
-INPUT_SIZE  = 256   # Thunder=256, Lightning=192
+MODEL_PATH  = "movenet_lightning.tflite"
+INPUT_SIZE  = 192   # Thunder=256, Lightning=192
 CONF_THRESH = 0.3
 
 interpreter = tflite.Interpreter(model_path=MODEL_PATH)
