@@ -2,7 +2,6 @@ import time
 import math
 
 import cv2
-import numpy as np
 from plyer import notification
 
 
@@ -35,6 +34,15 @@ class PostureTracker:
         self.smooth_face_h = None
         self.smooth_eye_angle = 0.0
         self.ema_alpha = 0.35
+
+        # Low-end performance controls.
+        self.detect_scale = 0.5
+        self.process_every_n_frames = 3
+        self.frame_index = 0
+        self.cached_face = None
+        self.cached_eye_angle = None
+        self.missed_face_frames = 0
+        self.max_cached_face_frames = 8
 
         # Notification controls to prevent alert spam.
         self.is_slouching = False
@@ -114,12 +122,16 @@ class PostureTracker:
         if now - self.last_notification_time < self.notification_cooldown_seconds:
             return
 
-        notification.notify(
-            title="Posture Alert",
-            message="You are slouching. Sit upright and level your shoulders.",
-            app_name="Posture Tracker",
-            timeout=5,
-        )
+        try:
+            notification.notify(
+                title="Posture Alert",
+                message="You are slouching. Sit upright and level your shoulders.",
+                app_name="Posture Tracker",
+                timeout=5,
+            )
+        except Exception:
+            # Some Windows notification backends fail on older setups.
+            pass
         self.last_notification_time = now
 
     def _draw_hud(self, frame, face, feedback, is_calibrating):
@@ -164,7 +176,46 @@ class PostureTracker:
             
             frame = cv2.flip(frame, 1)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            face = self._find_face(gray)
+            self.frame_index += 1
+            run_detector = (self.frame_index % self.process_every_n_frames) == 0
+
+            face = None
+            eye_angle = None
+
+            if run_detector:
+                small_gray = cv2.resize(
+                    gray,
+                    None,
+                    fx=self.detect_scale,
+                    fy=self.detect_scale,
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                detected_face = self._find_face(small_gray)
+                if detected_face is not None:
+                    x, y, w, h = detected_face
+                    scale = 1.0 / self.detect_scale
+                    face = (
+                        int(x * scale),
+                        int(y * scale),
+                        int(w * scale),
+                        int(h * scale),
+                    )
+                    eye_angle = self._find_eye_angle(gray, face)
+                    self.cached_face = face
+                    if eye_angle is not None:
+                        self.cached_eye_angle = eye_angle
+                    self.missed_face_frames = 0
+                else:
+                    self.missed_face_frames += 1
+                    if self.missed_face_frames > self.max_cached_face_frames:
+                        self.cached_face = None
+                        self.cached_eye_angle = None
+                    face = self.cached_face
+                    eye_angle = self.cached_eye_angle
+            else:
+                face = self.cached_face
+                eye_angle = self.cached_eye_angle
+
             feedback = []
             is_calibrating = (time.time() - self.calibration_start) < self.calibration_seconds
             is_slouching_now = False
@@ -176,7 +227,6 @@ class PostureTracker:
                 x, y, w, h = face
                 face_y = y + h / 2.0
                 face_h = float(h)
-                eye_angle = self._find_eye_angle(gray, face)
 
                 self.smooth_face_y = self._ema(self.smooth_face_y, face_y)
                 self.smooth_face_h = self._ema(self.smooth_face_h, face_h)
