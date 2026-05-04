@@ -27,7 +27,7 @@ def trigger_relay_off():
 # ===== MOVENET SETUP =====
 MODEL_PATH  = "movenet_lightning.tflite"
 INPUT_SIZE  = 192
-CONF_THRESH = 0.15   # lowered from 0.3
+CONF_THRESH = 0.15
 
 interpreter = tflite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
@@ -48,9 +48,9 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 # ===== POSTURE THRESHOLDS =====
-NECK_ANGLE_THRESH    = 25    # was 15
-SPINE_ANGLE_THRESH   = 20    # was 10
-SHOULDER_TILT_THRESH = 0.25  # was 0.15
+NECK_ANGLE_THRESH    = 30
+SPINE_ANGLE_THRESH   = 30
+SHOULDER_TILT_THRESH = 0.30
 
 # ===== STATE =====
 prev              = time.time()
@@ -90,7 +90,7 @@ def draw_skeleton(frame, keypoints, w, h):
     connections = [
         (KP_LEFT_SHOULDER, KP_RIGHT_SHOULDER),
         (KP_LEFT_SHOULDER, KP_LEFT_HIP),
-        (KP_RIGHT_SHOULDER,KP_RIGHT_HIP),
+        (KP_RIGHT_SHOULDER, KP_RIGHT_HIP),
         (KP_LEFT_HIP,      KP_RIGHT_HIP),
     ]
     for a, b in connections:
@@ -177,21 +177,25 @@ try:
             shoulder_mid = midpoint(l_shoulder, r_shoulder)
             hip_mid      = midpoint(l_hip,      r_hip)
 
-            issues = []
+            issues      = []
+            slouch_score = 0
 
-            # Check 1: spine slouch (always runs)
+            # Check 1: spine slouch
             spine_angle = angle_from_vertical(hip_mid, shoulder_mid)
             if spine_angle > SPINE_ANGLE_THRESH:
                 issues.append("slouching")
+                slouch_score += 1
 
-            # Check 2: shoulder tilt (always runs)
-            shoulder_w       = distance(l_shoulder, r_shoulder)
-            shoulder_tilt    = abs(l_shoulder[1] - r_shoulder[1])
+            # Check 2: shoulder tilt
+            shoulder_w    = distance(l_shoulder, r_shoulder)
+            shoulder_tilt = abs(l_shoulder[1] - r_shoulder[1])
             if shoulder_w > 0 and (shoulder_tilt / shoulder_w) > SHOULDER_TILT_THRESH:
                 issues.append("leaning sideways")
+                slouch_score += 1
 
             # Check 3: neck angle (only if ears visible)
             neck_angle = 0
+            ear_mid    = None
             if ears_ok:
                 l_ear      = kp_to_pixel(keypoints[KP_LEFT_EAR],  w, h)
                 r_ear      = kp_to_pixel(keypoints[KP_RIGHT_EAR], w, h)
@@ -199,8 +203,10 @@ try:
                 neck_angle = angle_from_vertical(shoulder_mid, ear_mid)
                 if neck_angle > NECK_ANGLE_THRESH:
                     issues.append("head forward")
+                    slouch_score += 1
 
-            is_bad = len(issues) > 0
+            # Needs at least 2 bad checks to trigger
+            is_bad = slouch_score >= 2
 
             if not is_bad:
                 posture = "Good posture"
@@ -213,7 +219,7 @@ try:
 
             # Draw posture lines
             cv2.line(frame, hip_mid, shoulder_mid, color, 2)
-            if ears_ok:
+            if ear_mid is not None:
                 cv2.line(frame, shoulder_mid, ear_mid, color, 2)
                 cv2.circle(frame, ear_mid,      7, (0,   255, 0),   -1)
             cv2.circle(frame, shoulder_mid, 7, (255, 0,   0),   -1)
