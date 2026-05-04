@@ -47,13 +47,13 @@ cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-# ===== HOW MUCH DEVIATION FROM BASELINE TRIGGERS BAD POSTURE =====
-NECK_DEVIATION   = 15   # degrees from baseline neck angle
-SPINE_DEVIATION  = 12   # degrees from baseline spine angle
-TILT_DEVIATION   = 0.12 # fraction of shoulder width deviation
-
-# ===== CALIBRATION =====
-CALIBRATION_TIME = 4.0  # seconds to sit upright at start
+# ===== THRESHOLDS =====
+# X offset between ear mid and shoulder mid — same logic as original code
+FORWARD_OFFSET_THRESH = 40   # pixels — head forward
+# Y drop between shoulder mid and current position
+Y_DROP_THRESH         = 30   # pixels — slouching down
+# Shoulder tilt
+TILT_THRESH           = 0.20 # fraction of shoulder width
 
 # ===== STATE =====
 prev              = time.time()
@@ -61,16 +61,6 @@ bad_posture_since = None
 shock_cooldown_ts = 0
 shocking          = False
 shock_start_time  = 0
-
-# Calibration state
-calibration_start    = None
-calibrating          = True
-baseline_spine       = None
-baseline_neck        = None
-baseline_tilt        = None
-calib_spine_samples  = []
-calib_neck_samples   = []
-calib_tilt_samples   = []
 
 # ===== HELPERS =====
 def run_inference(frame):
@@ -90,11 +80,6 @@ def midpoint(p1, p2):
 
 def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
-
-def angle_from_vertical(p1, p2):
-    dx = p2[0] - p1[0]
-    dy = p2[1] - p1[1]
-    return abs(math.degrees(math.atan2(dx, dy)))
 
 def conf_ok(keypoints, *indices):
     return all(keypoints[i][2] > CONF_THRESH for i in indices)
@@ -157,9 +142,7 @@ def get_status_text(is_bad):
         return f"Cooldown: {cooldown_left:.1f}s"
 
 # ===== MAIN LOOP =====
-print("Starting posture detection.")
-print(f"Sit upright for {CALIBRATION_TIME} seconds to calibrate...")
-calibration_start = time.time()
+print("Starting posture detection. Press Q to quit.")
 
 try:
     while True:
@@ -177,141 +160,96 @@ try:
         color   = (255, 255, 255)
         is_bad  = False
 
-        shoulders_hips_ok = conf_ok(keypoints,
-            KP_LEFT_SHOULDER, KP_RIGHT_SHOULDER,
-            KP_LEFT_HIP, KP_RIGHT_HIP
-        )
-        ears_ok = conf_ok(keypoints, KP_LEFT_EAR, KP_RIGHT_EAR)
+        shoulders_ok = conf_ok(keypoints, KP_LEFT_SHOULDER, KP_RIGHT_SHOULDER)
+        hips_ok      = conf_ok(keypoints, KP_LEFT_HIP, KP_RIGHT_HIP)
+        ears_ok      = conf_ok(keypoints, KP_LEFT_EAR, KP_RIGHT_EAR)
 
-        if shoulders_hips_ok:
-            l_shoulder = kp_to_pixel(keypoints[KP_LEFT_SHOULDER],  w, h)
+        if shoulders_ok:
+            l_shoulder = kp_to_pixel(keypoints[KP_LEFT_SHOULDER], w, h)
             r_shoulder = kp_to_pixel(keypoints[KP_RIGHT_SHOULDER], w, h)
-            l_hip      = kp_to_pixel(keypoints[KP_LEFT_HIP],       w, h)
-            r_hip      = kp_to_pixel(keypoints[KP_RIGHT_HIP],      w, h)
-
             shoulder_mid = midpoint(l_shoulder, r_shoulder)
-            hip_mid      = midpoint(l_hip,      r_hip)
 
-            spine_angle   = angle_from_vertical(hip_mid, shoulder_mid)
+            issues = []
+
+            # ===== CHECK 1: forward head offset (same as original code) =====
+            if ears_ok:
+                l_ear    = kp_to_pixel(keypoints[KP_LEFT_EAR],  w, h)
+                r_ear    = kp_to_pixel(keypoints[KP_RIGHT_EAR], w, h)
+                ear_mid  = midpoint(l_ear, r_ear)
+
+                # X offset: how far head is forward of shoulders
+                forward_offset = ear_mid[0] - shoulder_mid[0]
+                if abs(forward_offset) > FORWARD_OFFSET_THRESH:
+                    issues.append("head forward")
+
+                cv2.circle(frame, ear_mid,      8, (0,   255, 0), -1)
+                cv2.line(frame, shoulder_mid, ear_mid, (0, 255, 0) if not issues else (0, 0, 255), 2)
+                cv2.putText(frame, f"Offset: {forward_offset}",
+                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            else:
+                forward_offset = 0
+
+            # ===== CHECK 2: shoulder drop (slouching down) =====
+            if hips_ok:
+                l_hip  = kp_to_pixel(keypoints[KP_LEFT_HIP],  w, h)
+                r_hip  = kp_to_pixel(keypoints[KP_RIGHT_HIP], w, h)
+                hip_mid = midpoint(l_hip, r_hip)
+
+                # Y distance between shoulders and hips — shrinks when slouching
+                spine_height = hip_mid[1] - shoulder_mid[1]
+                # Normalize by frame height so distance from camera doesn't matter
+                spine_ratio  = spine_height / h
+
+                # We use a calibration-free check:
+                # if shoulders are too close to hips vertically, slouching
+                if spine_ratio < 0.18:
+                    issues.append("slouching")
+
+                cv2.line(frame, shoulder_mid, hip_mid,
+                    (0, 0, 255) if "slouching" in issues else (0, 255, 0), 2)
+                cv2.putText(frame, f"Spine ratio: {spine_ratio:.2f}",
+                    (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            # ===== CHECK 3: shoulder tilt =====
             shoulder_w    = distance(l_shoulder, r_shoulder)
             shoulder_tilt = abs(l_shoulder[1] - r_shoulder[1])
-            tilt_ratio    = (shoulder_tilt / shoulder_w) if shoulder_w > 0 else 0
+            if shoulder_w > 0 and (shoulder_tilt / shoulder_w) > TILT_THRESH:
+                issues.append("leaning sideways")
 
-            neck_angle = None
-            ear_mid    = None
-            if ears_ok:
-                l_ear      = kp_to_pixel(keypoints[KP_LEFT_EAR],  w, h)
-                r_ear      = kp_to_pixel(keypoints[KP_RIGHT_EAR], w, h)
-                ear_mid    = midpoint(l_ear, r_ear)
-                neck_angle = angle_from_vertical(shoulder_mid, ear_mid)
+            cv2.circle(frame, shoulder_mid, 8, (255, 0, 0), -1)
 
-            # ===== CALIBRATION PHASE =====
-            if calibrating:
-                elapsed_calib = time.time() - calibration_start
-                remaining_calib = max(0, CALIBRATION_TIME - elapsed_calib)
+            is_bad = len(issues) > 0
 
-                calib_spine_samples.append(spine_angle)
-                calib_tilt_samples.append(tilt_ratio)
-                if neck_angle is not None:
-                    calib_neck_samples.append(neck_angle)
-
-                if elapsed_calib >= CALIBRATION_TIME:
-                    baseline_spine = sum(calib_spine_samples) / len(calib_spine_samples)
-                    baseline_tilt  = sum(calib_tilt_samples)  / len(calib_tilt_samples)
-                    baseline_neck  = (sum(calib_neck_samples) / len(calib_neck_samples)
-                                      if calib_neck_samples else None)
-                    calibrating = False
-                    print(f"Calibration done. Baseline spine={baseline_spine:.1f} "
-                          f"neck={baseline_neck} tilt={baseline_tilt:.3f}")
-
-                # Draw calibration overlay
-                cv2.putText(frame,
-                    f"Calibrating... sit upright! {remaining_calib:.1f}s",
-                    (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                cv2.putText(frame,
-                    f"Spine: {spine_angle:.1f}",
-                    (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-            # ===== DETECTION PHASE =====
+            if not is_bad:
+                posture = "Good posture"
+                color   = (0, 255, 0)
             else:
-                issues       = []
-                slouch_score = 0
+                posture = "Bad: " + ", ".join(issues)
+                color   = (0, 0, 255)
 
-                # Check 1: spine deviation from baseline
-                spine_diff = abs(spine_angle - baseline_spine)
-                if spine_diff > SPINE_DEVIATION:
-                    issues.append("slouching")
-                    slouch_score += 1
+            handle_relay(is_bad)
 
-                # Check 2: shoulder tilt deviation from baseline
-                tilt_diff = abs(tilt_ratio - baseline_tilt)
-                if tilt_diff > TILT_DEVIATION:
-                    issues.append("leaning sideways")
-                    slouch_score += 1
-
-                # Check 3: neck deviation from baseline (ears only)
-                if neck_angle is not None and baseline_neck is not None:
-                    neck_diff = abs(neck_angle - baseline_neck)
-                    if neck_diff > NECK_DEVIATION:
-                        issues.append("head forward")
-                        slouch_score += 1
-
-                # Need at least 1 bad check to trigger
-                is_bad = slouch_score >= 1
-
-                if not is_bad:
-                    posture = "Good posture"
-                    color   = (0, 255, 0)
-                else:
-                    posture = "Bad: " + ", ".join(issues)
-                    color   = (0, 0, 255)
-
-                handle_relay(is_bad)
-
-                # Draw posture lines
-                cv2.line(frame, hip_mid, shoulder_mid, color, 2)
-                if ear_mid is not None:
-                    cv2.line(frame, shoulder_mid, ear_mid, color, 2)
-                    cv2.circle(frame, ear_mid,      7, (0,   255, 0),   -1)
-                cv2.circle(frame, shoulder_mid, 7, (255, 0,   0),   -1)
-                cv2.circle(frame, hip_mid,      7, (0,   0,   255), -1)
-
-                neck_str = f"{neck_angle:.1f}" if neck_angle is not None else "N/A"
-                cv2.putText(frame,
-                    f"Neck: {neck_str}  Spine: {spine_angle:.1f}",
-                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-                if baseline_neck is not None and neck_angle is not None:
-                    cv2.putText(frame,
-                        f"Base Neck: {baseline_neck:.1f}  Base Spine: {baseline_spine:.1f}",
-                        (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-
-                cv2.putText(frame, posture, (10, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-
-                status = get_status_text(is_bad)
-                if status:
-                    cv2.putText(frame, status,
-                        (10, 145), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 100, 255), 2)
-
-                # FPS
-                now = time.time()
-                fps  = 1 / (now - prev) if now != prev else 0
-                prev = now
-                cv2.putText(frame, f"FPS: {fps:.0f}", (10, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            status = get_status_text(is_bad)
+            if status:
+                cv2.putText(frame, status,
+                    (10, 130), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, (0, 100, 255), 2)
 
         else:
-            posture           = "Landmarks not visible"
-            color             = (255, 255, 0)
             bad_posture_since = None
             if shocking:
                 trigger_relay_off()
                 shocking = False
-            if not calibrating:
-                cv2.putText(frame, posture, (10, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+
+        # FPS
+        now = time.time()
+        fps  = 1 / (now - prev) if now != prev else 0
+        prev = now
+
+        cv2.putText(frame, posture,           (10, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1,   color,          2)
+        cv2.putText(frame, f"FPS: {fps:.0f}", (10, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         cv2.imshow("Posture Monitor (q to quit)", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
