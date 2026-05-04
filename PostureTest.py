@@ -4,6 +4,62 @@ import math
 import cv2
 from plyer import notification
 
+# ===== GPIO SETUP (with fallback mocking) =====
+try:
+    import RPi.GPIO as GPIO
+except ModuleNotFoundError:
+    # Mock GPIO for non-Pi systems (testing/development)
+    class MockGPIO:
+        BCM = "BCM"
+        OUT = "OUT"
+        HIGH = 1
+        LOW = 0
+        
+        @staticmethod
+        def setwarnings(flag):
+            """Stub for GPIO.setwarnings on non-Pi systems."""
+            pass
+        
+        @staticmethod
+        def setmode(mode):
+            """Stub for GPIO.setmode on non-Pi systems."""
+            pass
+        
+        @staticmethod
+        def setup(pin, mode, initial=None):
+            """Stub for GPIO.setup on non-Pi systems."""
+            pass
+        
+        @staticmethod
+        def output(pin, level):
+            """Stub for GPIO.output on non-Pi systems."""
+            pass
+        
+        @staticmethod
+        def cleanup():
+            """Stub for GPIO.cleanup on non-Pi systems."""
+            pass
+    
+    GPIO = MockGPIO()
+
+RELAY_PIN_1 = 27
+RELAY_PIN_2 = 17
+
+GPIO.setwarnings(False)
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(RELAY_PIN_1, GPIO.OUT, initial=GPIO.HIGH)
+GPIO.setup(RELAY_PIN_2, GPIO.OUT, initial=GPIO.HIGH)
+
+def relays_on():
+    """Activate both relays."""
+    GPIO.output(RELAY_PIN_1, GPIO.LOW)
+    GPIO.output(RELAY_PIN_2, GPIO.LOW)
+
+def relays_off():
+    """Deactivate both relays."""
+    GPIO.output(RELAY_PIN_1, GPIO.HIGH)
+    GPIO.output(RELAY_PIN_2, GPIO.HIGH)
+
 
 class PostureTracker:
     def __init__(self):
@@ -44,10 +100,17 @@ class PostureTracker:
         self.missed_face_frames = 0
         self.max_cached_face_frames = 8
 
-        # Notification controls to prevent alert spam.
+        # Posture and relay state
         self.is_slouching = False
-        self.last_notification_time = 0.0
-        self.notification_cooldown_seconds = 45
+        self.bad_posture_start_time = None
+        self.pulse_active = False
+        self.pulse_start_time = 0
+        self.cooldown_until = 0
+        
+        # Timing constants (seconds)
+        self.bad_posture_delay = 3.0  # wait 3 seconds of bad posture before triggering
+        self.pulse_duration = 1.0  # relay stays on for 1 second
+        self.post_pulse_cooldown = 2.0  # wait 2 seconds after pulse before checking again
 
     def _ema(self, previous, current):
         if previous is None:
@@ -118,46 +181,106 @@ class PostureTracker:
         return feedback, slouch_score > 0
 
     def _notify_slouch(self):
+        """Handle pulse activation and timing logic."""
         now = time.time()
-        if now - self.last_notification_time < self.notification_cooldown_seconds:
-            return
+        
+        # End pulse if duration exceeded
+        if self.pulse_active and (now - self.pulse_start_time >= self.pulse_duration):
+            relays_off()
+            self.pulse_active = False
+            self.cooldown_until = now + self.post_pulse_cooldown
+            self.bad_posture_start_time = None
+        
+        # Start pulse if bad posture delay reached and not in cooldown
+        if self.is_slouching and not self.pulse_active and now > self.cooldown_until:
+            if self.bad_posture_start_time is None:
+                self.bad_posture_start_time = now
+            
+            time_in_bad = now - self.bad_posture_start_time
+            if time_in_bad >= self.bad_posture_delay:
+                relays_on()
+                self.pulse_active = True
+                self.pulse_start_time = now
+                self.bad_posture_start_time = None
+        
+        # Reset timer if posture corrected
+        if not self.is_slouching:
+            self.bad_posture_start_time = None
+            if self.pulse_active:
+                relays_off()
+                self.pulse_active = False
+                self.cooldown_until = now + self.post_pulse_cooldown
 
-        try:
-            notification.notify(
-                title="Posture Alert",
-                message="You are slouching. Sit upright and level your shoulders.",
-                app_name="Posture Tracker",
-                timeout=5,
-            )
-        except Exception:
-            # Some Windows notification backends fail on older setups.
-            pass
-        self.last_notification_time = now
-
-    def _draw_hud(self, frame, face, feedback, is_calibrating):
+    def _draw_hud(self, frame, face, feedback, is_calibrating, now):
         if face is not None:
             x, y, w, h = face
             cv2.rectangle(frame, (x, y), (x + w, y + h), (90, 220, 90), 2)
 
+        y_pos = 30
+        
+        # Calibration timer
         if is_calibrating:
+            calib_elapsed = now - self.calibration_start
+            calib_remaining = max(0, self.calibration_seconds - calib_elapsed)
             cv2.putText(
                 frame,
-                "Calibrating... sit upright",
-                (10, 30),
+                f"Calibrating... {calib_remaining:.1f}s",
+                (10, y_pos),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
                 (0, 255, 255),
                 2,
             )
+            y_pos += 35
 
+        # Posture feedback messages
         for i, msg in enumerate(feedback):
             cv2.putText(
                 frame,
                 msg,
-                (10, 65 + i * 28),
+                (10, y_pos + i * 28),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.75,
                 (0, 0, 255),
+                2,
+            )
+        
+        # Pulse/cooldown timers
+        if self.pulse_active:
+            # Show pulse duration remaining
+            time_left = max(0, self.pulse_duration - (now - self.pulse_start_time))
+            cv2.putText(
+                frame,
+                f"PULSE: {time_left:.1f}s",
+                (10, frame.shape[0] - 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 0, 255),
+                3,
+            )
+        elif now < self.cooldown_until:
+            # Show cooldown remaining
+            cooldown_left = max(0, self.cooldown_until - now)
+            cv2.putText(
+                frame,
+                f"Cooldown: {cooldown_left:.1f}s",
+                (10, frame.shape[0] - 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 165, 255),
+                2,
+            )
+        elif self.is_slouching and self.bad_posture_start_time is not None:
+            # Show bad posture countdown
+            time_in_bad = now - self.bad_posture_start_time
+            time_until_pulse = max(0, self.bad_posture_delay - time_in_bad)
+            cv2.putText(
+                frame,
+                f"Bad posture: {time_until_pulse:.1f}s until pulse",
+                (10, frame.shape[0] - 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 165, 255),
                 2,
             )
     
@@ -168,7 +291,7 @@ class PostureTracker:
             raise RuntimeError("Could not open webcam.")
 
         self.calibration_start = time.time()
-        
+        print("Posture tracker started. Calibrating for 3 seconds...")
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -219,6 +342,7 @@ class PostureTracker:
             feedback = []
             is_calibrating = (time.time() - self.calibration_start) < self.calibration_seconds
             is_slouching_now = False
+            now = time.time()
 
             if face is None:
                 feedback.append("Face not found - stay centered")
@@ -243,21 +367,23 @@ class PostureTracker:
                     )
 
                     if is_slouching_now and not self.is_slouching:
-                        self._notify_slouch()
-                    elif is_slouching_now:
-                        self._notify_slouch()
-
+                        pass  # Update state; pulse logic runs next
+                    
                     self.is_slouching = is_slouching_now
+                    self._notify_slouch()  # Handle pulse timing
 
-            self._draw_hud(frame, face, feedback, is_calibrating)
+            self._draw_hud(frame, face, feedback, is_calibrating, now)
             
             cv2.imshow("Posture Tracker", frame)
             
             if cv2.waitKey(10) & 0xFF == ord('q'):
                 break
         
+        relays_off()
         cap.release()
         cv2.destroyAllWindows()
+        GPIO.cleanup()
+        print("Posture tracker stopped.")
 
 if __name__ == "__main__":
     tracker = PostureTracker()
