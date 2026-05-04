@@ -55,7 +55,7 @@ ALERT_COOLDOWN    = 10.0
 # Was 0.25 — too lenient, head had to move a lot
 # Now 0.10 — flags bad posture with much smaller forward lean
 # Lower = stricter. Try 0.08 if still too lenient, 0.12 if too sensitive
-NECK_FORWARD_THRESH = 0.10
+NECK_FORWARD_THRESH = 0.06
 
 # ===== STATE =====
 prev               = time.time()
