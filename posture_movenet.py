@@ -48,9 +48,11 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 # ===== POSTURE THRESHOLDS =====
-NECK_ANGLE_THRESH    = 30
-SPINE_ANGLE_THRESH   = 30
-SHOULDER_TILT_THRESH = 0.30
+# Angles read near 180 when upright due to camera angle
+# Flag bad posture when angle drops BELOW these values
+NECK_ANGLE_THRESH    = 150   # below this = head forward
+SPINE_ANGLE_THRESH   = 150   # below this = slouching
+SHOULDER_TILT_THRESH = 0.30  # fraction of shoulder width
 
 # ===== STATE =====
 prev              = time.time()
@@ -88,10 +90,10 @@ def conf_ok(keypoints, *indices):
 
 def draw_skeleton(frame, keypoints, w, h):
     connections = [
-        (KP_LEFT_SHOULDER, KP_RIGHT_SHOULDER),
-        (KP_LEFT_SHOULDER, KP_LEFT_HIP),
+        (KP_LEFT_SHOULDER,  KP_RIGHT_SHOULDER),
+        (KP_LEFT_SHOULDER,  KP_LEFT_HIP),
         (KP_RIGHT_SHOULDER, KP_RIGHT_HIP),
-        (KP_LEFT_HIP,      KP_RIGHT_HIP),
+        (KP_LEFT_HIP,       KP_RIGHT_HIP),
     ]
     for a, b in connections:
         if conf_ok(keypoints, a, b):
@@ -177,12 +179,12 @@ try:
             shoulder_mid = midpoint(l_shoulder, r_shoulder)
             hip_mid      = midpoint(l_hip,      r_hip)
 
-            issues      = []
+            issues       = []
             slouch_score = 0
 
-            # Check 1: spine slouch
+            # Check 1: spine slouch — flag if angle drops below threshold
             spine_angle = angle_from_vertical(hip_mid, shoulder_mid)
-            if spine_angle > SPINE_ANGLE_THRESH:
+            if spine_angle < SPINE_ANGLE_THRESH:
                 issues.append("slouching")
                 slouch_score += 1
 
@@ -193,7 +195,7 @@ try:
                 issues.append("leaning sideways")
                 slouch_score += 1
 
-            # Check 3: neck angle (only if ears visible)
+            # Check 3: neck angle — only if ears visible
             neck_angle = 0
             ear_mid    = None
             if ears_ok:
@@ -201,11 +203,11 @@ try:
                 r_ear      = kp_to_pixel(keypoints[KP_RIGHT_EAR], w, h)
                 ear_mid    = midpoint(l_ear, r_ear)
                 neck_angle = angle_from_vertical(shoulder_mid, ear_mid)
-                if neck_angle > NECK_ANGLE_THRESH:
+                if neck_angle < NECK_ANGLE_THRESH:
                     issues.append("head forward")
                     slouch_score += 1
 
-            # Needs at least 2 bad checks to trigger
+            # Need at least 2 bad checks to trigger
             is_bad = slouch_score >= 2
 
             if not is_bad:
