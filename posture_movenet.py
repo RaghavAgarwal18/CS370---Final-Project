@@ -9,14 +9,14 @@ except ImportError:
     tflite = tf.lite
 
 # ===== GPIO SETUP =====
-RELAY_PIN         = 17
-SHOCK_DURATION    = 0.5    # seconds relay stays ON
-BAD_POSTURE_DELAY = 3.0    # seconds of bad posture before shock
-SHOCK_COOLDOWN    = 10.0   # seconds before next shock
+RELAY_PIN         = 27
+SHOCK_DURATION    = 0.5
+BAD_POSTURE_DELAY = 3.0
+SHOCK_COOLDOWN    = 10.0
 
+GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(RELAY_PIN, GPIO.OUT, initial=GPIO.HIGH)
-# HIGH = relay OFF (active-low relay module)
 
 def trigger_relay_on():
     GPIO.output(RELAY_PIN, GPIO.LOW)
@@ -27,7 +27,7 @@ def trigger_relay_off():
 # ===== MOVENET SETUP =====
 MODEL_PATH  = "movenet_lightning.tflite"
 INPUT_SIZE  = 192
-CONF_THRESH = 0.3
+CONF_THRESH = 0.15   # lowered from 0.3
 
 interpreter = tflite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
@@ -48,9 +48,9 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 # ===== POSTURE THRESHOLDS =====
-NECK_ANGLE_THRESH    = 15
-SPINE_ANGLE_THRESH   = 10
-SHOULDER_TILT_THRESH = 0.15
+NECK_ANGLE_THRESH    = 25    # was 15
+SPINE_ANGLE_THRESH   = 20    # was 10
+SHOULDER_TILT_THRESH = 0.25  # was 0.15
 
 # ===== STATE =====
 prev              = time.time()
@@ -67,7 +67,7 @@ def run_inference(frame):
     interpreter.set_tensor(input_details[0]["index"], inp)
     interpreter.invoke()
     kps = interpreter.get_tensor(output_details[0]["index"])
-    return kps[0][0]  # shape [17, 3]
+    return kps[0][0]
 
 def kp_to_pixel(kp, w, h):
     return int(kp[1] * w), int(kp[0] * h)
@@ -88,8 +88,6 @@ def conf_ok(keypoints, *indices):
 
 def draw_skeleton(frame, keypoints, w, h):
     connections = [
-        (KP_LEFT_EAR,      KP_LEFT_SHOULDER),
-        (KP_RIGHT_EAR,     KP_RIGHT_SHOULDER),
         (KP_LEFT_SHOULDER, KP_RIGHT_SHOULDER),
         (KP_LEFT_SHOULDER, KP_LEFT_HIP),
         (KP_RIGHT_SHOULDER,KP_RIGHT_HIP),
@@ -109,7 +107,6 @@ def handle_relay(is_bad):
     global shocking, shock_start_time, shock_cooldown_ts, bad_posture_since
     now = time.time()
 
-    # Turn off shock after duration
     if shocking and (now - shock_start_time >= SHOCK_DURATION):
         trigger_relay_off()
         shocking = False
@@ -124,7 +121,7 @@ def handle_relay(is_bad):
             trigger_relay_on()
             shocking = True
             shock_start_time = now
-            bad_posture_since = now  # reset timer
+            bad_posture_since = now
     else:
         bad_posture_since = None
         if shocking:
@@ -165,44 +162,43 @@ try:
         color   = (255, 255, 255)
         is_bad  = False
 
-        needed = [
-            KP_LEFT_EAR, KP_RIGHT_EAR,
+        shoulders_hips_ok = conf_ok(keypoints,
             KP_LEFT_SHOULDER, KP_RIGHT_SHOULDER,
             KP_LEFT_HIP, KP_RIGHT_HIP
-        ]
+        )
+        ears_ok = conf_ok(keypoints, KP_LEFT_EAR, KP_RIGHT_EAR)
 
-        if conf_ok(keypoints, *needed):
-            l_ear      = kp_to_pixel(keypoints[KP_LEFT_EAR],       w, h)
-            r_ear      = kp_to_pixel(keypoints[KP_RIGHT_EAR],      w, h)
+        if shoulders_hips_ok:
             l_shoulder = kp_to_pixel(keypoints[KP_LEFT_SHOULDER],  w, h)
             r_shoulder = kp_to_pixel(keypoints[KP_RIGHT_SHOULDER], w, h)
             l_hip      = kp_to_pixel(keypoints[KP_LEFT_HIP],       w, h)
             r_hip      = kp_to_pixel(keypoints[KP_RIGHT_HIP],      w, h)
 
-            ear_mid      = midpoint(l_ear,      r_ear)
             shoulder_mid = midpoint(l_shoulder, r_shoulder)
             hip_mid      = midpoint(l_hip,      r_hip)
 
-            # Check 1: forward head lean
-            neck_angle   = angle_from_vertical(shoulder_mid, ear_mid)
-            head_forward = neck_angle > NECK_ANGLE_THRESH
+            issues = []
 
-            # Check 2: spine slouch
+            # Check 1: spine slouch (always runs)
             spine_angle = angle_from_vertical(hip_mid, shoulder_mid)
-            slouching   = spine_angle > SPINE_ANGLE_THRESH
+            if spine_angle > SPINE_ANGLE_THRESH:
+                issues.append("slouching")
 
-            # Check 3: lateral shoulder tilt
+            # Check 2: shoulder tilt (always runs)
             shoulder_w       = distance(l_shoulder, r_shoulder)
             shoulder_tilt    = abs(l_shoulder[1] - r_shoulder[1])
-            leaning_sideways = (
-                (shoulder_tilt / shoulder_w) > SHOULDER_TILT_THRESH
-                if shoulder_w > 0 else False
-            )
+            if shoulder_w > 0 and (shoulder_tilt / shoulder_w) > SHOULDER_TILT_THRESH:
+                issues.append("leaning sideways")
 
-            issues = []
-            if head_forward:     issues.append("head forward")
-            if slouching:        issues.append("slouching")
-            if leaning_sideways: issues.append("leaning sideways")
+            # Check 3: neck angle (only if ears visible)
+            neck_angle = 0
+            if ears_ok:
+                l_ear      = kp_to_pixel(keypoints[KP_LEFT_EAR],  w, h)
+                r_ear      = kp_to_pixel(keypoints[KP_RIGHT_EAR], w, h)
+                ear_mid    = midpoint(l_ear, r_ear)
+                neck_angle = angle_from_vertical(shoulder_mid, ear_mid)
+                if neck_angle > NECK_ANGLE_THRESH:
+                    issues.append("head forward")
 
             is_bad = len(issues) > 0
 
@@ -216,18 +212,17 @@ try:
             handle_relay(is_bad)
 
             # Draw posture lines
-            cv2.line(frame, hip_mid,      shoulder_mid, color, 2)
-            cv2.line(frame, shoulder_mid, ear_mid,      color, 2)
-            cv2.circle(frame, ear_mid,      7, (0,   255, 0),   -1)
+            cv2.line(frame, hip_mid, shoulder_mid, color, 2)
+            if ears_ok:
+                cv2.line(frame, shoulder_mid, ear_mid, color, 2)
+                cv2.circle(frame, ear_mid,      7, (0,   255, 0),   -1)
             cv2.circle(frame, shoulder_mid, 7, (255, 0,   0),   -1)
             cv2.circle(frame, hip_mid,      7, (0,   0,   255), -1)
 
-            # Debug angles
             cv2.putText(frame,
                 f"Neck: {neck_angle:.1f}  Spine: {spine_angle:.1f}",
                 (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            # Shock status
             status = get_status_text(is_bad)
             if status:
                 cv2.putText(frame, status,
