@@ -5,15 +5,25 @@ import cv2
 import RPi.GPIO as GPIO
 
 # ===== GPIO SETUP =====
-RELAY_PIN = 17
+RELAY_PIN_1 = 17
+RELAY_PIN_2 = 27
+RELAY_PINS = (RELAY_PIN_1, RELAY_PIN_2)
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(RELAY_PIN, GPIO.OUT)
-GPIO.output(RELAY_PIN, GPIO.HIGH)  # HIGH = relay OFF (active low board)
+for relay_pin in RELAY_PINS:
+    GPIO.setup(relay_pin, GPIO.OUT)
+    GPIO.output(relay_pin, GPIO.HIGH)  # HIGH = relay OFF (active low board)
 
 # ===== SETTINGS (tweak these to your liking) =====
 BAD_POSTURE_DELAY  = 3.0   # seconds of bad posture before triggering TENS
 SHOCK_DURATION     = 1.0   # seconds the TENS stays on per trigger
 COOLDOWN_DURATION  = 5.0   # seconds to wait before triggering again
+
+
+def set_relay_state(on):
+    """Drive both relay channels to the same state."""
+    level = GPIO.LOW if on else GPIO.HIGH
+    for relay_pin in RELAY_PINS:
+        GPIO.output(relay_pin, level)
 
 
 class PostureTracker:
@@ -133,7 +143,7 @@ class PostureTracker:
 
         # Turn off shock after SHOCK_DURATION seconds
         if self.shocking and (now - self.shock_start_time >= SHOCK_DURATION):
-            GPIO.output(RELAY_PIN, GPIO.HIGH)  # HIGH = off (active low)
+            set_relay_state(False)
             self.shocking = False
             self.last_shock_time = now
             print("TENS off.")
@@ -149,7 +159,7 @@ class PostureTracker:
             if (time_in_bad_posture >= BAD_POSTURE_DELAY
                     and not self.shocking
                     and time_since_last_shock >= COOLDOWN_DURATION):
-                GPIO.output(RELAY_PIN, GPIO.LOW)  # LOW = on (active low)
+                set_relay_state(True)
                 self.shocking = True
                 self.shock_start_time = now
                 print("Bad posture detected - TENS on!")
@@ -157,7 +167,7 @@ class PostureTracker:
             # Good posture — reset timer and turn off if mid shock
             self.bad_posture_start = None
             if self.shocking:
-                GPIO.output(RELAY_PIN, GPIO.HIGH)  # HIGH = off (active low)
+                set_relay_state(False)
                 self.shocking = False
                 print("Posture corrected - TENS off.")
 
@@ -284,7 +294,7 @@ class PostureTracker:
                 self.bad_posture_start = None
                 # turn off TENS if face lost
                 if self.shocking:
-                    GPIO.output(RELAY_PIN, GPIO.HIGH)
+                    set_relay_state(False)
                     self.shocking = False
                     print("Face lost - TENS off.")
             else:
@@ -321,7 +331,7 @@ class PostureTracker:
 
         # ===== CLEANUP =====
         print("Shutting down...")
-        GPIO.output(RELAY_PIN, GPIO.HIGH)  # make sure TENS is off
+        set_relay_state(False)  # make sure TENS is off
         cap.release()
         cv2.destroyAllWindows()
         GPIO.cleanup()
