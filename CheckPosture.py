@@ -63,13 +63,15 @@ def relays_off():
 
 class PostureTracker:
     def __init__(self):
-        self.face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        self.eye_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_eye.xml"
-        )
+        self.face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+        self.eye_cascade = cv2.CascadeClassifier("haarcascade_eye.xml")
 
+        # Verify they loaded
+        if self.face_cascade.empty():
+            print("Error: Could not load face cascade. Check if the XML file is in the folder.")
+        if self.eye_cascade.empty():
+            print("Error: Could not load eye cascade. Check if the XML file is in the folder.")
+            
         if self.face_cascade.empty() or self.eye_cascade.empty():
             raise RuntimeError("OpenCV Haar cascades could not be loaded.")
 
