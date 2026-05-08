@@ -8,10 +8,12 @@ import math
 from tracking_stats import TrackingStats
 from camera_utils import open_camera
 
-# ===== Shock / Relay configuration (local, not `copied from other modules) =====
-BAD_POSTURE_DELAY = float(os.getenv("BAD_POSTURE_DELAY", "3.0"))
+
+BAD_POSTURE_DELAY = float(os.getenv("BAD_POSTURE_DELAY", "5.0"))
 PULSE_DURATION = float(os.getenv("PULSE_DURATION", "1.0"))
-POST_PULSE_COOLDOWN = float(os.getenv("POST_PULSE_COOLDOWN", "3.0"))
+POST_PULSE_COOLDOWN = float(os.getenv("POST_PULSE_COOLDOWN", "5.0"))
+CALIBRATION_MIN_SAMPLES = int(os.getenv("CALIBRATION_MIN_SAMPLES", "12"))
+CALIBRATION_MIN_SECONDS = float(os.getenv("CALIBRATION_MIN_SECONDS", "3.0"))
 
 try:
     import RPi.GPIO as GPIO  # type: ignore
@@ -32,10 +34,12 @@ try:
 except Exception:
     # Safe mock for non-Pi environments
     def relays_on() -> None:
-        print("[mock relays_on]")
+        # keep silent in mock to avoid terminal clutter
+        pass
 
     def relays_off() -> None:
-        print("[mock relays_off]")
+        # keep silent in mock to avoid terminal clutter
+        pass
 
 @dataclass
 class Box:
@@ -94,10 +98,29 @@ class TrackerRuntimeState:
 
 
 def load_cascade(filename: str) -> cv2.CascadeClassifier:
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + filename)
-    if cascade.empty():
-        raise RuntimeError(f"Failed to load OpenCV cascade: {filename}")
-    return cascade
+    # Try cv2.data path first (works on most systems)
+    if hasattr(cv2, 'data') and hasattr(cv2.data, 'haarcascades'):
+        cascade_path = cv2.data.haarcascades + filename
+        cascade = cv2.CascadeClassifier(cascade_path)
+        if not cascade.empty():
+            return cascade
+    
+    # Fallback paths for Pi/Linux systems
+    fallback_paths = [
+        f"/usr/share/opencv4/cascades/{filename}",
+        f"/usr/local/share/opencv4/cascades/{filename}",
+        f"/home/pi/.local/lib/python*/site-packages/cv2/data/{filename}",
+    ]
+    
+    for path in fallback_paths:
+        import glob
+        matches = glob.glob(path)
+        if matches:
+            cascade = cv2.CascadeClassifier(matches[0])
+            if not cascade.empty():
+                return cascade
+    
+    raise RuntimeError(f"Failed to load OpenCV cascade: {filename}. Tried cv2.data and common fallback paths.")
 
 
 def find_eye_angle(gray: np.ndarray, face: Box, eye_cascade: cv2.CascadeClassifier) -> float | None:
@@ -236,7 +259,7 @@ def analyze_frame(
     if baseline is None:
         calibration_samples = [*calibration_samples, body_offset]
         elapsed = now - calibration_start
-        if len(calibration_samples) >= 10 and elapsed >= 2.0:
+        if len(calibration_samples) >= CALIBRATION_MIN_SAMPLES and elapsed >= CALIBRATION_MIN_SECONDS:
             offsets = np.array(calibration_samples, dtype=np.float32)
             baseline = (float(np.median(offsets[:, 0])), float(np.median(offsets[:, 1])))
             calibrating = False
@@ -272,7 +295,7 @@ def render_frame(frame: np.ndarray, analysis: FrameAnalysis) -> None:
         draw_box(frame, analysis.body_box, (200, 160, 0), "Upper body")
 
     color = (0, 200, 0) if analysis.status == "good" else (0, 0, 200)
-    cv2.putText(frame, f"{analysis.status.upper()}  SCORE:{analysis.score}", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+    cv2.putText(frame, f"{analysis.status.upper()}  SCORE:{analysis.score}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
 
 def show_status_frame(window_name: str, message: str) -> None:
@@ -500,11 +523,11 @@ def process_tracker_frame(
             y_drop = face_center_y - state.baseline_face_y
             forward_ratio = face_h / max(1.0, state.baseline_face_h)
             face_slouch = False
-            if y_drop > state.y_drop_threshold_px:
+            if y_drop > state.y_drop_threshold_px + 5:
                 face_slouch = True
                 if "You're slouching down - sit taller" not in analysis.issues:
                     analysis.issues.append("You're slouching down - sit taller")
-            if forward_ratio > state.forward_scale_ratio:
+            if forward_ratio > state.forward_scale_ratio + 0.05:
                 face_slouch = True
                 if "Head too forward - pull neck back" not in analysis.issues:
                     analysis.issues.append("Head too forward - pull neck back")
@@ -521,13 +544,46 @@ def process_tracker_frame(
 
     render_frame(preview, analysis)
 
+    # Show countdown warning if bad posture is being counted down
+    if analysis.status == "bad" and state.bad_posture_since is not None and not state.pulse_active:
+        time_in_bad = now - state.bad_posture_since
+        time_until_pulse = max(0.0, BAD_POSTURE_DELAY - time_in_bad)
+        warning_text = f"⚡ PULSE IN {time_until_pulse:.1f}s"
+        cv2.putText(preview, warning_text, (10, preview.shape[0] - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
+    elif state.pulse_active:
+        time_left = max(0.0, PULSE_DURATION - (now - state.pulse_start_time))
+        cv2.putText(preview, f"⚡ PULSING... {time_left:.1f}s", (10, preview.shape[0] - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
+    elif now < state.cooldown_until:
+        cooldown_left = max(0.0, state.cooldown_until - now)
+        cv2.putText(preview, f"⏳ Cooldown: {cooldown_left:.1f}s", (10, preview.shape[0] - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+
     # Update shock/pulse state (may activate relays)
     update_shock_state(stats, analysis, state, now)
 
     maybe_publish_stats(stats, analysis, now, state)
 
+    # If calibrating, show a clear overlay with progress and hint to recalibrate
+    if analysis.calibrating:
+        elapsed = now - state.calibration_start
+        cv2.putText(preview, f"CALIBRATING {elapsed:.1f}s/{CALIBRATION_MIN_SECONDS:.1f}s", (10, preview.shape[0] - 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 200), 2)
+        cv2.putText(preview, f"Samples: {len(state.calibration_samples)}", (10, preview.shape[0] - 45), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        cv2.putText(preview, "Press R to recalibrate", (10, preview.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
+
     cv2.imshow(window_name, preview)
-    return (cv2.waitKey(1) & 0xFF) != ord("q")
+    # accept 'q' or 'Q' to quit, 'r' or 'R' to recalibrate
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('q') or key == ord('Q'):
+        return False
+    if key == ord('r') or key == ord('R'):
+        state.calibration_start = time.time()
+        state.calibration_samples = []
+        state.baseline = None
+        # also reset face/eye baseline smoothing so calibration starts fresh
+        state.baseline_eye_angle = None
+        state.baseline_face_y = None
+        state.baseline_face_h = None
+        return True
+    return True
 
 
 def run_tracker() -> None:
@@ -536,7 +592,7 @@ def run_tracker() -> None:
     eye_cascade = load_cascade("haarcascade_eye.xml")
 
     cap, camera_label = open_camera()
-    print(f"Using camera: {camera_label}")
+    print("PostureGuard: camera started")
 
     window_name = "Posture Tracker"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
