@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PostureGuard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;500;700;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0a0a0f;
+    --surface:  #111118;
+    --border:   rgba(255,255,255,0.08);
+    --text:     #e8e8f0;
+    --muted:    rgba(232,232,240,0.45);
+    --green:    #1ede8a;
+    --green-d:  #0d9456;
+    --red:      #ff4f4f;
+    --red-d:    #8b1a1a;
+    --amber:    #f5a623;
+    --blue:     #5b8af0;
+    --radius:   12px;
+    --font:     'Syne', sans-serif;
+    --mono:     'DM Mono', monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    min-height: 100vh;
+    padding: 2rem;
+    line-height: 1.5;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.015) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.015) 1px, transparent 1px);
+    background-size: 32px 32px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 2.5rem;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .logo-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: var(--green);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .logo-icon svg { width: 22px; height: 22px; }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    color: var(--text);
+  }
+
+  .live-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 99px;
+  }
+
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+
+  .live-dot.offline { background: var(--red); animation: none; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .status-hero {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 2.5rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+    transition: border-color 0.4s, background 0.4s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .status-hero::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 0.4s;
+    pointer-events: none;
+  }
+
+  .status-hero.good { border-color: var(--green-d); }
+  .status-hero.good::after { background: radial-gradient(ellipse at 0% 50%, rgba(30,222,138,0.06) 0%, transparent 70%); opacity: 1; }
+  .status-hero.bad  { border-color: var(--red-d); }
+  .status-hero.bad::after  { background: radial-gradient(ellipse at 0% 50%, rgba(255,79,79,0.08) 0%, transparent 70%); opacity: 1; }
+
+  .status-orb {
+    flex-shrink: 0;
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    background: var(--green);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.4s, box-shadow 0.4s;
+  }
+
+  .status-orb.bad          { background: var(--red);   box-shadow: 0 0 32px rgba(255,79,79,0.35); }
+  .status-orb.good         { box-shadow: 0 0 32px rgba(30,222,138,0.25); }
+  .status-orb.calibrating  { background: var(--amber); box-shadow: none; }
+  .status-orb.no_detection { background: #333;         box-shadow: none; }
+  .status-orb svg { width: 32px; height: 32px; }
+
+  .status-text h2 {
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: -1px;
+    margin-bottom: 4px;
+    transition: color 0.4s;
+  }
+
+  .status-text h2.good        { color: var(--green); }
+  .status-text h2.bad         { color: var(--red); }
+  .status-text h2.calibrating { color: var(--amber); }
+  .status-text h2.no_detection{ color: var(--muted); }
+
+  .status-issues {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .issue-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 4px;
+    background: rgba(255,79,79,0.15);
+    color: #ff8080;
+    border: 1px solid rgba(255,79,79,0.25);
+  }
+
+  .score-ring {
+    margin-left: auto;
+    flex-shrink: 0;
+    position: relative;
+    width: 100px;
+    height: 100px;
+  }
+
+  .score-ring svg { transform: rotate(-90deg); }
+
+  .score-label {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .score-num {
+    font-size: 26px;
+    font-weight: 800;
+    line-height: 1;
+  }
+
+  .score-sub {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 1.5rem;
+  }
+
+  .metric-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.25rem;
+  }
+
+  .metric-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+  }
+
+  .metric-value {
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: -1px;
+    line-height: 1;
+  }
+
+  .metric-unit {
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--muted);
+    margin-left: 2px;
+  }
+
+  .bottom-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 12px;
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+  }
+
+  .panel-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin-bottom: 1.25rem;
+  }
+
+  .chart-wrap {
+    position: relative;
+    height: 220px;
+  }
+
+  .shock-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+
+  .shock-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: rgba(255,79,79,0.07);
+    border: 1px solid rgba(255,79,79,0.15);
+  }
+
+  .shock-time {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--red);
+  }
+
+  .shock-reason {
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .empty-log {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+    padding: 2rem 0;
+  }
+
+  .reset-btn {
+    margin-top: 1rem;
+    width: 100%;
+    padding: 10px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.2s, color 0.2s;
+  }
+
+  .reset-btn:hover { border-color: rgba(255,255,255,0.2); color: var(--text); }
+
+  @media (max-width: 800px) {
+    .metrics { grid-template-columns: repeat(2, 1fr); }
+    .bottom-grid { grid-template-columns: 1fr; }
+    .score-ring { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#0a0a0f" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a5 5 0 0 1 5 5v3a5 5 0 0 1-10 0V7a5 5 0 0 1 5-5z"/>
+          <path d="M8 22v-3a4 4 0 0 1 8 0v3"/>
+        </svg>
+      </div>
+      <h1>PostureGuard</h1>
+    </div>
+    <div class="live-pill">
+      <div class="live-dot offline" id="liveDot"></div>
+      <span id="liveLabel">connecting...</span>
+    </div>
+  </header>
+
+  <div class="status-hero" id="statusHero">
+    <div class="status-orb calibrating" id="statusOrb">
+      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" id="statusIcon">
+        <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+      </svg>
+    </div>
+    <div class="status-text">
+      <h2 class="calibrating" id="statusText">Connecting...</h2>
+      <div class="status-issues" id="issuesList"></div>
+    </div>
+    <div class="score-ring">
+      <svg width="100" height="100" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="42" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="8"/>
+        <circle cx="50" cy="50" r="42" fill="none" stroke="var(--green)" stroke-width="8"
+          stroke-dasharray="263.9" stroke-dashoffset="263.9" stroke-linecap="round" id="scoreArc"/>
+      </svg>
+      <div class="score-label">
+        <span class="score-num" id="scoreNum">—</span>
+        <span class="score-sub">score</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="metrics">
+    <div class="metric-card">
+      <div class="metric-label">Session</div>
+      <div class="metric-value" id="mSession">0<span class="metric-unit">m</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Good posture</div>
+      <div class="metric-value" id="mGood" style="color:var(--green)">0<span class="metric-unit">s</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Bad posture</div>
+      <div class="metric-value" id="mBad" style="color:var(--red)">0<span class="metric-unit">s</span></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Shocks fired</div>
+      <div class="metric-value" id="mShocks" style="color:var(--amber)">0</div>
+    </div>
+  </div>
+
+  <div class="bottom-grid">
+    <div class="panel">
+      <div class="panel-title">Posture score over time</div>
+      <div class="chart-wrap">
+        <canvas id="scoreChart" role="img" aria-label="Line chart showing posture score over time">Posture score history.</canvas>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">Shock log</div>
+      <div class="shock-list" id="shockList">
+        <div class="empty-log">No shocks yet</div>
+      </div>
+      <button class="reset-btn" onclick="resetSession()">Reset session</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const SERVER = window.location.origin;
+
+  const scoreHistory = [];
+  const timeLabels   = [];
+  const MAX_POINTS   = 60;
+  const CIRC         = 263.9;
+
+  const chart = new Chart(document.getElementById('scoreChart'), {
+    type: 'line',
+    data: {
+      labels: timeLabels,
+      datasets: [{
+        label: 'Score',
+        data: scoreHistory,
+        borderColor: '#1ede8a',
+        backgroundColor: 'rgba(30,222,138,0.08)',
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.4,
+        fill: true,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: {
+          ticks: { color: 'rgba(232,232,240,0.35)', font: { family: 'DM Mono', size: 10 }, maxTicksLimit: 6 },
+          grid:  { color: 'rgba(255,255,255,0.04)' }
+        },
+        y: {
+          min: 0, max: 100,
+          ticks: { color: 'rgba(232,232,240,0.35)', font: { family: 'DM Mono', size: 10 }, stepSize: 25 },
+          grid:  { color: 'rgba(255,255,255,0.04)' }
+        }
+      }
+    }
+  });
+
+  function fmt(ts) {
+    return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function applyStatus(data) {
+    const s = data.status;
+
+    document.getElementById('statusHero').className = 'status-hero ' + (s === 'good' ? 'good' : s === 'bad' ? 'bad' : '');
+    document.getElementById('statusOrb').className  = 'status-orb ' + s;
+
+    const icons = {
+      good:         '<path d="M20 6L9 17l-5-5"/>',
+      bad:          '<path d="M18 6L6 18"/><path d="M6 6l12 12"/>',
+      calibrating:  '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+      no_detection: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>'
+    };
+    document.getElementById('statusIcon').innerHTML = icons[s] || icons.no_detection;
+
+    const labels = { good: 'Good posture', bad: 'Bad posture', calibrating: 'Calibrating...', no_detection: 'No detection' };
+    const txt = document.getElementById('statusText');
+    txt.className   = s;
+    txt.textContent = labels[s] || 'Unknown';
+
+    document.getElementById('issuesList').innerHTML = (data.issues || [])
+      .map(i => `<span class="issue-tag">${i}</span>`).join('');
+
+    const latestScore = data.score ?? 0;
+    // maintain rolling history (max ~60 points ~= 60s)
+    if (scoreHistory.length >= MAX_POINTS) { scoreHistory.shift(); timeLabels.shift(); }
+    scoreHistory.push(latestScore);
+    const avg = scoreHistory.length ? Math.round(scoreHistory.reduce((a,b) => a+b, 0) / scoreHistory.length) : 0;
+
+    // Display the 60s average as the main score
+    document.getElementById('scoreNum').textContent = avg;
+    const arc = document.getElementById('scoreArc');
+    arc.style.strokeDashoffset = CIRC - (CIRC * avg / 100);
+    arc.style.stroke = avg >= 70 ? 'var(--green)' : avg >= 40 ? 'var(--amber)' : 'var(--red)';
+
+    document.getElementById('mSession').innerHTML = `${data.session_mins ?? 0}<span class="metric-unit">m</span>`;
+    document.getElementById('mGood').innerHTML    = `${data.good_seconds ?? 0}<span class="metric-unit">s</span>`;
+    document.getElementById('mBad').innerHTML     = `${data.bad_seconds ?? 0}<span class="metric-unit">s</span>`;
+    document.getElementById('mShocks').textContent = data.shock_count ?? 0;
+
+    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    // ensure chart gets latest raw values (we keep the same history array)
+    timeLabels.push(now);
+    chart.update('none');
+
+    const shocks = data.shock_log || [];
+    const log = document.getElementById('shockList');
+    if (shocks.length === 0) {
+      log.innerHTML = '<div class="empty-log">No shocks yet</div>';
+    } else {
+      log.innerHTML = [...shocks].reverse().map(sh => `
+        <div class="shock-item">
+          <span class="shock-time">${fmt(sh.time)}</span>
+          <span class="shock-reason">${(sh.issues || []).join(', ') || 'bad posture'}</span>
+        </div>
+      `).join('');
+    }
+  }
+
+  function setOnline(online) {
+    document.getElementById('liveDot').className   = 'live-dot' + (online ? '' : ' offline');
+    document.getElementById('liveLabel').textContent = online ? 'live' : 'offline';
+  }
+
+  function resetSession() {
+    fetch(SERVER + '/reset', { method: 'POST' }).catch(() => {});
+  }
+
+  try {
+    const socket = io(SERVER, { transports: ['websocket', 'polling'] });
+    socket.on('connect',    () => setOnline(true));
+    socket.on('disconnect', () => setOnline(false));
+    socket.on('posture_update', data => applyStatus(data));
+  } catch(e) {
+    setInterval(() => {
+      fetch(SERVER + '/state')
+        .then(r => r.json())
+        .then(d => { applyStatus(d); setOnline(true); })
+        .catch(() => setOnline(false));
+    }, 1000);
+  }
+
+  fetch(SERVER + '/state')
+    .then(r => r.json())
+    .then(d => { applyStatus(d); setOnline(true); })
+    .catch(() => setOnline(false));
+</script>
+</body>
+</html>
